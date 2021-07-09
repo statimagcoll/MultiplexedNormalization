@@ -1,0 +1,851 @@
+---
+title: "Code Supplement - Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images"
+author: "Coleman Harris, coleman.r.harris@vanderbilt.edu"
+date: "2021-07-09"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+---
+
+This notebook details the various analyses and code implementations used in the paper, "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images." Please see [here](https://colemanrharris.me) for more information on the paper. The analyses here rely also on the following scripts, available in the Github repository, for further functionality:
+
+- `all_combat_functions_210709.R`: code to run the ComBat algorithm
+- `all_fda_functions_210709.R`: code to run the functional data registration algorithm
+- `all_otsu_functions_210709.R`: code to run collect Otsu threshold and metrics
+
+## Setup
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,fig.width = 10,message = FALSE)
+## tidyverse packages
+require(dplyr)
+require(tidyr)
+
+## visualization packages
+require(ggplot2)
+require(ggpubr)
+require(ggforce)
+require(viridis)
+
+## methods packages
+require(fda)
+require(umap)
+require(lme4)
+require(emmeans)
+require(uwot)
+require(reticulate)
+
+## set useful variables for later on
+x_axis_text_size = 8
+vals = rev(inferno(43))
+```
+
+## Load data
+
+```{r load data}
+## load data from https://github.com/statimagcoll/atlasAnalysis
+sc = atlasAnalysis::loadQuantifiedPCA()
+
+## remove other cols that aren't median cell intensities
+to_remove = grep("Median_Cyt|Median_Nuc|Median_Mem",colnames(sc))
+sc = sc[,-to_remove]
+
+## select markers for analysis
+all_vars = c("Median_Cell_CD3D","Median_Cell_CD8","Median_Cell_COLLAGEN",
+             "Median_Cell_VIMENTIN","Median_Cell_PANCK","Median_Cell_NAKATPASE",
+             "Median_Cell_SOX9","Median_Cell_BCATENIN","Median_Cell_OLFM4")
+
+## -- set all methods
+methods = c("log10","mean_division","mean_division_log10","cube_root")
+methods = c(methods,paste0(methods[1:4],"_fda_registered_x1"))
+methods = c(methods,paste0(methods[1:4],"_ComBat_incl_zeroes"))
+## -- !end set all methods
+```
+
+## Run transformations
+Run the scale transformations on each variable as selected above. The transformations included are as follows:
+
+- log10: $\log_{10}(y + 1)$
+- cube root: $\sqrt[3]{y}$
+- mean division: $\frac{y}{\mu_{ic}}$
+- mean division log10: $\log_{10}(\frac{y}{\mu_{ic}} + \frac{1}{2})$
+
+```{r transforms}
+## --- --- ---
+## --- log10 + 1
+## --- --- ---
+for(v in all_vars){
+  sc[,paste0(v,"_log10")] = log10(sc[,v]+1)
+}
+
+## --- --- ---
+## --- cube root
+## --- --- ---
+for(v in all_vars){
+  sc[,paste0(v,"_cube_root")] = sc[,v]^(1/3)
+}
+
+## --- --- ---
+## --- mean division, log mean division
+## --- --- ---
+for(v in all_vars){
+	slides = split(sc,sc$SlideID)
+	joe_l = list()
+	for(i in 1:length(slides)){
+	    s = data.frame(slides[[i]])
+	    s[,paste0(v,"_mean_division")] = s[,v] / mean(s[,v],na.rm=TRUE)
+	    joe_l[[i]] = s
+	}
+	sc = data.frame(data.table::rbindlist(joe_l))
+	sc[,paste0(v,"_mean_division_log10")] = log10(sc[,paste0(v,"_mean_division")]+0.5)
+	
+	sc[,paste0(v,"_mean_division")] = sc[,paste0(v,"_mean_division")] + -min(sc[,paste0(v,"_mean_division")])
+	sc[,paste0(v,"_mean_division_log10")] = sc[,paste0(v,"_mean_division_log10")] + -min(sc[,paste0(v,"_mean_division_log10")])
+}
+## --- --- ---
+## --- rename raw values for later analysis
+## --- --- ---
+for(v in all_vars){
+  sc[,paste0(v,"_raw")] = sc[,v]
+}
+```
+
+## Run the functional data registration algorithm
+
+```{r fda,results='hide'}
+## --- --- ---
+## --- fda
+## --- --- ---
+source("all_fda_functions_210709.R")
+
+## loop over all variables and methods to run the registration
+for(j in all_vars){
+  for(i in methods[1:4]){
+    ## update variable names
+    normedVar = paste0(j,"_",i,"_fda_registered_x")
+    var = paste0(j,"_",i)
+    
+    ## run 1 iteration of registration
+    for(k in 1){
+      sc = register_var(var = var,
+                        normedVar = paste0(normedVar,k),
+                        normedVariter = k,
+                        cb_atl = sc)
+      var = paste0(normedVar,k)
+    }
+  }
+}
+```
+
+## Run the ComBat algorithm
+
+```{r combat}
+## --- --- ---
+## --- ComBat
+## --- --- ---
+source("all_combat_functions_210709.R")
+
+## loop over all variables and methods to run ComBat
+for(j in all_vars){
+  for(m in methods[1:4]){
+    ## update variable name
+    scale_channel = paste0(j,"_",m)
+    
+    ## run ComBat algorithm on given method and marker channel
+    sc[,paste0(scale_channel,"_ComBat_incl_zeroes")] = adjust_vals(channel = scale_channel,slide_var="SlideID",chan=sc,remove_zeroes = FALSE)
+  }
+}
+```
+
+## Run evaluation metrics for downstream analysis
+```{r otsus}
+## --- --- ---
+## --- Otsu thresholds
+## --- --- ---
+source("all_otsu_functions_210709.R")
+
+## list for adjusting variable names
+adjList = list("log10" ="Unnormalized: log10",
+  "mean_division" ="Unnormalized: Mean division",
+  "mean_division_log10" ="Unnormalized: Mean division log10",
+  "cube_root" ="Unnormalized: Cube root",
+  "log10_fda_registered_x1" ="fda: log10",
+  "mean_division_fda_registered_x1" ="fda: Mean division",
+  "mean_division_log10_fda_registered_x1" ="fda: Mean division log10",
+  "cube_root_fda_registered_x1" ="fda: Cube root",
+  "log10_ComBat_incl_zeroes" ="ComBat: log10",
+  "mean_division_ComBat_incl_zeroes" ="ComBat: Mean division",
+  "mean_division_log10_ComBat_incl_zeroes" ="ComBat: Mean division log10",
+  "cube_root_ComBat_incl_zeroes" ="ComBat: Cube root")
+
+## --- generate dataset of Otsu thresholds
+otsus  = generate_otsu_data(sc,all_vars = all_vars,c(methods,"raw"))
+
+## --- run misclassification metrics on Otsus
+all_means = run_misclassification(sc,otsus,c(methods,"raw"))
+```
+
+## Figure 1: Visual comparison of vimentin marker densities for each transformation method
+```{r fig1,fig.height=7}
+htan1 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=log10_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("log10"),limits = c(0,5)) +
+  scale_y_continuous(name="Density",limits=c(0,2)) +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan2 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_ComBat_incl_zeroes,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=log10_ComBat_incl_zeroes_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("log10 (ComBat)")) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+  
+htan3 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_log10_fda_registered_x1,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=log10_fda_registered_x1_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("log10 (fda)"),limits = c(0,5)) +
+  scale_y_continuous(name="Density",limits=c(0,2)) +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan4 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_cube_root,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=cube_root_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Cube root"),limits=c(0,30)) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan5 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_cube_root_ComBat_incl_zeroes,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=cube_root_ComBat_incl_zeroes_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Cube root (ComBat)"),limits=c(-25,25)) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan6 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_cube_root_fda_registered_x1,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=cube_root_fda_registered_x1_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Cube root (fda) "),limits=c(0,20)) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan7 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_mean_division,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Mean division"),limits=c(0,5)) +
+  scale_y_continuous(name="Density",limits=c(0,3)) +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan8 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_mean_division_ComBat_incl_zeroes,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_ComBat_incl_zeroes_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Mean division (ComBat)"),limits=c(0,2)) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan9 = ggplot(sc) +
+    geom_density(aes(x=Median_Cell_VIMENTIN_mean_division_fda_registered_x1,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_fda_registered_x1_threshold,color=SlideID)) +
+    theme(legend.position = "None") +
+    scale_x_continuous(name=  paste0("Mean division"),limits=c(0,5)) +
+    scale_y_continuous(name="Density",limits=c(0,3)) +
+    scale_color_manual(values = vals) +
+    theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan10 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_mean_division_log10,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_log10_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Mean division log10"),limits=c(0,2)) +
+  scale_y_continuous(name="Density",limits=c(0,5)) +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan11 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_mean_division_log10_ComBat_incl_zeroes,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_log10_ComBat_incl_zeroes_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Mean division log10 (ComBat)")) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+htan12 = ggplot(sc) +
+  geom_density(aes(x=Median_Cell_VIMENTIN_mean_division_log10_fda_registered_x1,color=SlideID)) + 
+  geom_rug(data=otsus[otsus$channel=="Median_Cell_VIMENTIN",],aes(x=mean_division_log10_fda_registered_x1_threshold,color=SlideID)) +
+  theme(legend.position = "None") +
+  scale_x_continuous(name=  paste0("Mean division log10 (fda)")) +
+  scale_y_continuous(name="Density") +
+  scale_color_manual(values = vals) +
+  theme(axis.title.x = element_text(size=x_axis_text_size))
+
+## fig1 plot
+ggpubr::ggarrange(htan1,htan2,htan3,
+                  htan4,htan5,htan6,
+                  htan7,htan8,htan9,
+                  htan10,htan11,htan12,nrow=4,ncol =3)
+```
+
+## Figure 2A: Otsu misclassification
+```{r fig2a,fig.height=6}
+## --- calculate as ratios to raw data
+all_ratios=all_means
+all_ratios[,2:ncol(all_ratios)] = round(matrix(all_means[,2:ncol(all_ratios)]) - as.vector(data.frame(all_means[13,2:ncol(all_ratios)])),3)
+
+not_rows = c("raw")
+plot_values = all_ratios[!(all_ratios$method %in% not_rows),]
+
+## change names for cleaner plotting
+method_values = c("Unnormalized: Cube root",
+                       "ComBat: Cube root", 
+                       "fda: Cube root",
+                       "Unnormalized: log10",
+                       "ComBat: log10", 
+                       "fda: log10",
+                       "Unnormalized: Mean division",
+                       "ComBat: Mean division", 
+                       "fda: Mean division",
+                       "Unnormalized: Mean division log10",
+                       "ComBat: Mean division log10",
+                       "fda: Mean division log10")
+plot_values$method = method_values
+
+## calculate mean misclassification
+mean_values = data.frame(rowMeans(plot_values[,-c(1)]))
+mean_values$method = method_values
+colnames(mean_values)[1] = c("means")
+
+## plotting variables
+size_val = 3
+alpha_val = .8
+
+## fig2a plot
+ggplot(plot_values) +
+  geom_vline(xintercept=0)+
+  geom_point(aes(x=Median_Cell_CD3D,y=method,color="CD3"),size=size_val,alpha=alpha_val)+
+  geom_point(aes(x=Median_Cell_CD8,y=method,color="CD8"),size=size_val,alpha=alpha_val)+
+  geom_point(aes(x=Median_Cell_COLLAGEN,y=method,color="COLLAGEN"),size=size_val,alpha=alpha_val)+
+  geom_point(aes(x=Median_Cell_NAKATPASE,y=method,color="NAKATPASE"),size=size_val,alpha=alpha_val)+
+  geom_point(aes(x=Median_Cell_PANCK,y=method,color="PANCK"),size=size_val,alpha=alpha_val)+
+  geom_point(aes(x=Median_Cell_VIMENTIN,y=method,color="VIMENTIN"),size=size_val,alpha=alpha_val) +
+  geom_point(aes(x=Median_Cell_SOX9,y=method,color="SOX9"),size=size_val,alpha=alpha_val) +
+  geom_point(aes(x=Median_Cell_BCATENIN,y=method,color="BCATENIN"),size=size_val,alpha=alpha_val) +
+  geom_point(aes(x=Median_Cell_OLFM4,y=method,color="OLFM4"),size=size_val,alpha=alpha_val) +
+  geom_point(data = mean_values,aes(x=means,y=method,group=method),color="black",fill="white",shape=23,size=3)+
+  scale_x_continuous("Change in mean misclassification for method, compared to raw data")+
+  scale_y_discrete("")+
+  scale_color_discrete("Marker") +
+  theme(axis.text.y = element_text(hjust = 0))
+```
+
+## Figure 2B: Otsu misclassification (using manual labels)
+```{r fig2b,fig.height=6}
+## --- calculate Otsus on manual labels for CD3 & CD8
+cd3s = c(); cd8s = c()
+pred_methods = c(methods, "raw")
+
+## calculate Otsu threshold
+for(m in pred_methods){
+  cd3s = c(cd3s,get_otsu_sk(sc[,paste0("Median_Cell_CD3D","_",m)]))
+  cd8s = c(cd8s,get_otsu_sk(sc[,paste0("Median_Cell_CD8","_",m)]))
+}
+
+## generate boolean for marker positive
+for(i in 1:length(cd3s)){
+  m = pred_methods[i]
+  sc[,paste0("CD3_Otsu_Boolean_",m)] = sc[,paste("Median_Cell_CD3D",m,sep = "_")] > cd3s[i]
+  sc[,paste0("CD8_Otsu_Boolean_",m)] = sc[,paste("Median_Cell_CD8",m,sep = "_")] > cd8s[i]
+}
+
+## turn manual labels into booleans
+sc$cd3_bool = ifelse(sc$CD3D=="CD3D+",1,0)
+sc$cd8_bool = ifelse(sc$CD8=="CD8+",1,0)
+
+## --- calculate accuracy of maintaining manual labels
+cd3_acc = c()
+cd8_acc = c()
+for(m in pred_methods){
+  cmat1 = caret::confusionMatrix(as.factor(sc$cd3_bool), as.factor(sc[,paste0("CD3_Otsu_Boolean_",m)]*1))
+  cd3_acc = c(cd3_acc,cmat1$overall["Accuracy"]) 
+  
+  cmat2 = caret::confusionMatrix(as.factor(sc$cd8_bool), as.factor(sc[,paste0("CD8_Otsu_Boolean_",m)]*1))
+  cd8_acc = c(cd8_acc,cmat2$overall["Accuracy"])
+}
+
+## subtract raw from each method
+cd3_acc = cd3_acc - cd3_acc[13]
+cd8_acc = cd8_acc - cd8_acc[13]
+
+## create plotting dataset
+acc_dat = data.frame(c(pred_methods[-13],pred_methods[-13]))
+colnames(acc_dat) = c("method")
+acc_dat$method = unname(unlist(adjList[acc_dat$method]))
+acc_dat$values = c(cd3_acc[-13],cd8_acc[-13])
+acc_dat$marker = c(rep("CD3",12),rep("CD8",12))
+
+## fig2b plot
+ggplot(acc_dat)+
+  geom_vline(xintercept = 0)+
+  geom_point(aes(x=values,y=method,color=marker),size=3) +
+  scale_x_continuous("Change in marker-positive accuracy, compared to raw data")+
+  scale_y_discrete("")+
+  scale_color_manual("Marker",values=c("lightskyblue","chocolate3")) +
+  theme(axis.text.y = element_text(hjust = 0),legend.position = "right")
+```
+
+## Figure 3: Proportion of variance present at slide-level in random effects model for CD3 andCD8 markers
+```{r fig3}
+## --- --- ---
+### --- get baseline values from raw data
+## --- --- ---
+
+m = "raw"
+## ---- CD3 
+## modeling
+cd3_form = as.formula(paste0("Median_Cell_CD3D_",m,"~epi*lessBroad + (1|SlideID)"))
+cd3_mod = lmer(cd3_form,data=sc)
+
+## setup variance vals
+varcomp_cd3 = (c(unname(attr(summary(cd3_mod)$varcor$SlideID,"stddev")),
+        summary(cd3_mod)$sigma))^2
+varcomp_cd3 = varcomp_cd3/sum(varcomp_cd3)
+svar1 = varcomp_cd3[1]
+
+## ---- CD8
+## modeling
+cd8_form = as.formula(paste0("Median_Cell_CD8_",m,"~epi*lessBroad + (1|SlideID)"))
+cd8_mod = lmer(cd8_form,data=sc)
+
+## setup variance vals
+varcomp_cd8 = (c(unname(attr(summary(cd8_mod)$varcor$SlideID,"stddev")),
+        summary(cd8_mod)$sigma))^2
+varcomp_cd8 = varcomp_cd8/sum(varcomp_cd8)
+svar2 = varcomp_cd8[1]
+
+## --- --- ---
+### --- get variance components from each method
+## --- --- ---
+cd3_vcs = data.frame()
+cd8_vcs = data.frame()
+
+for(m in methods){
+  ## ---- CD3 
+  ## modeling
+  cd3_form = as.formula(paste0("Median_Cell_CD3D_",m,"~epi*lessBroad + (1|SlideID)"))
+  cd3_mod = lmer(cd3_form,data=sc)
+  varcomp_cd3 = (c(unname(attr(summary(cd3_mod)$varcor$SlideID,"stddev")),
+          summary(cd3_mod)$sigma))^2
+  
+  ## setup variance vals
+  varcomp_cd3 = varcomp_cd3/sum(varcomp_cd3)
+  varcomp_cd3 = data.frame(varcomp_cd3)
+  
+  ## data setup
+  colnames(varcomp_cd3)[1] = c("variance")
+  varcomp_cd3$level = c("Slide","Residual")
+  varcomp_cd3$method = m
+  cd3_vcs = rbind(cd3_vcs,varcomp_cd3)
+  
+  ## ---- CD8
+  ## modeling
+  cd8_form = as.formula(paste0("Median_Cell_CD8_",m,"~epi*lessBroad + (1|SlideID)"))
+  cd8_mod = lmer(cd8_form,data=sc)
+  varcomp_cd8 = (c(unname(attr(summary(cd8_mod)$varcor$SlideID,"stddev")),
+          summary(cd8_mod)$sigma))^2
+    
+  ## setup variance vals
+  varcomp_cd8 = varcomp_cd8/sum(varcomp_cd8)
+  varcomp_cd8 = data.frame(varcomp_cd8)  
+  
+  ## data setup
+  colnames(varcomp_cd8)[1] = c("variance")
+  varcomp_cd8$level = c("Slide","Residual")
+  varcomp_cd8$method = m
+  cd8_vcs = rbind(cd8_vcs,varcomp_cd8)
+}
+
+#cd3_vcs = cd3_vcs[!(cd3_vcs$method %in% not_cols),]
+#cd8_vcs = cd8_vcs[!(cd8_vcs$method %in% not_cols),]
+
+## change values
+cd3_vcs$method = unname(unlist(adjList[cd3_vcs$method]))
+cd8_vcs$method = unname(unlist(adjList[cd8_vcs$method]))
+
+## generate plots
+gcd3 = ggplot(cd3_vcs) +
+  geom_col(aes(y=method,x=variance,fill=level)) +
+  theme(axis.text.y = element_text(hjust = 1)) +
+  scale_fill_manual("Level",values=rev(viridis::magma(2)))+
+  geom_vline(xintercept=svar1) +
+  scale_x_continuous("Proportion of variance")+
+  scale_y_discrete("")+
+  ggtitle("CD3") +
+  theme(axis.text.y = element_text(size = 10))
+
+gcd8 = ggplot(cd8_vcs) +
+  geom_col(aes(y=method,x=variance,fill=level)) +
+  theme(axis.text.y = element_text(hjust = 1)) +
+  scale_fill_manual("Level",values=rev(viridis::magma(2)))+
+  geom_vline(xintercept=svar2) +
+  scale_x_continuous("Proportion of variance")+
+  scale_y_discrete("")+
+  ggtitle("CD8") +
+  theme(axis.text.y = element_text(size = 10))
+
+## fig3 plot
+ggpubr::ggarrange(gcd3,gcd8,nrow=2,ncol=1,legend = "bottom",common.legend = TRUE)
+```
+
+## Figure 4: Comparison of cell proportions for each transformation method
+### 4a: Manually labelled cells
+```{r fig4a}
+tts = read.csv('/media/disk2/atlas_mxif/data/TissueSubTypes Colon Map.csv')
+
+## --- match capitalization and types, combine data
+names(tts)[1] = 'TissueID'
+tts$adenSSLcrc = ifelse(tts$tissueSubType %in% c('Tub', 'TV'), 'AD', 
+                        ifelse(tts$tissueSubType %in% c('HP', 'HP/SSL', 'SSL', 'Tub/SSL'), 'SSL', 
+                               ifelse(tts$tissueSubType %in% c('CRC'), 'CRC', NA )) )
+tts$SlideID = sc$SlideID[match(tts$TissueID, sc$TissueID)]
+tts = tts[,c('SlideID', 'adenSSLcrc')]
+sc = merge(sc, tts, all.x=TRUE)
+sc = sc[ sc$lessBroad %in% c('AD', 'SSL', 'HP'),]
+sc = sc[ sc$Tumor>0,]
+
+#sc$cd3_bool = ifelse(sc$CD3D=="CD3D+",1,0)
+#sc$cd8_bool = ifelse(sc$CD8=="CD8+",1,0)
+
+## --- group data
+small_sc= sc %>% 
+  group_by(Slide_Region,epi,SlideID,lessBroad,.add=TRUE) %>% 
+  summarise_at(colnames(sc)[c(which(grepl("Otsu_Boolean",colnames(sc))),which(colnames(sc) %in% c("cd3_bool","cd8_bool")))],mean)
+
+small_sc$epi= ifelse(small_sc$epi == 1,"Epithelium","Stroma")
+
+# methods = c("log10","mean_division","mean_division_log10","cube_root","fifth_root","raw")
+# methods = c(methods,paste0(methods,"_fda_registered_x1"))
+# methods = c(methods,paste0(methods[1:6],"_ComBat_incl_zeroes"))
+# not_cols = c("fifth_root","fifth_root_ComBat_incl_zeroes","fifth_root_fda_registered_x1",
+#              "raw","raw_ComBat_incl_zeroes",
+#              "raw_fda_registered_x1")
+# methods = methods[!(methods %in% not_cols)]
+
+## --- setup variables for analysis
+methods = sort(methods)[c(4:6,1:3,7:9,10:12)]
+methods_bool = paste0("Otsu_Boolean_",methods)
+CD3_vars = paste("CD3", methods_bool, sep="_" )
+CD8_vars = paste("CD8", methods_bool, sep="_" )
+CD3_varcomps = data.frame()
+CD8_varcomps = data.frame()
+
+run_var_comps = function(v){
+  ## --- generate model and fits
+  formula_v = as.formula(paste0(v,"~epi*lessBroad+(1|SlideID)"))
+  mod_v = lmer(formula_v,data=small_sc)
+  CIs_v = emmeans(mod_v, as.formula(paste('~ 1 | ', "lessBroad", ' + epi')), type='response')
+  fits_v = as.data.frame(summary(CIs_v))
+  
+  ## --- calc varcomps
+  varcomp_v = (c(unname(attr(summary(mod_v)$varcor$SlideID,"stddev")),
+            summary(mod_v)$sigma))^2
+  varcomp_v = data.frame(varcomp_v)
+  varcomp_v$level = c("Slide","Cell (Residual)")
+  varcomp_v$method = stringr::str_replace(v,"CD3_Otsu_Boolean_","")
+  colnames(varcomp_v)[1] = c("Variance")
+  
+  return(list("varcomps"=varcomp_v,
+              "fits"=fits_v))
+}
+
+get_cp_plot = function(v,fits,m_v,marker="CD3",dat=small_sc){
+  ggplot(dat, aes(x=as.factor(epi),y=get(v),color=as.factor(epi),fill=as.factor(epi)))+
+      gghalves::geom_half_point(side = "l",range_scale = .4, alpha = .5) +
+      geom_boxplot(width=0.1,alpha=0.5,outlier.shape = NA) +
+      ## random effects estimated means, not included.
+      # geom_jitter(data=fits[fits$lessBroad=="AD",],aes(x=as.factor(epi),y=emmean),size=2,width=0.05,shape=23,fill="lightblue4") +
+      # geom_jitter(data=fits[fits$lessBroad=="HP",],aes(x=as.factor(epi),y=emmean),size=2,width=0.05,shape=23,fill="midnightblue") +
+      # geom_jitter(data=fits[fits$lessBroad=="SSL",],aes(x=as.factor(epi),y=emmean), size=2,width=0.05,shape=23,fill="lightslateblue") +
+      ggdist::stat_halfeye(adjust = .85, width = .5, .width = 0, justification = -.25, point_colour = NA,alpha=0.5) +
+      scale_x_discrete(m_v) +
+      scale_y_continuous(paste0(marker," Proportions"),limits=c(-0.05,1.05))+
+      scale_fill_manual(values=c("lightslateblue","coral1"))+
+      scale_color_manual(values=c("lightslateblue","coral1"))+
+      theme(legend.position = "None")
+      #scale_fill_manual("Tumor Type",values=viridis::magma(10)[c(4,7,10)])
+}
+
+## CD3 base
+vb1 = "cd3_bool"
+vbobj1 = run_var_comps(v = vb1)
+b1 = get_cp_plot(vb1, vbobj1$fits,m_v="CD3 Ground Truth Label",marker="CD3")
+
+## CD8 base
+vb2 = "cd8_bool"
+vbobj2 = run_var_comps(v = vb2)
+b2 = get_cp_plot(vb2, vbobj2$fits,m_v="CD8 Ground Truth Label",marker="CD8")
+
+## fig4a plot
+bfig = ggpubr::ggarrange(b1,b2,common.legend = TRUE,legend = "none")
+ggpubr::annotate_figure(bfig, top=text_grob("Baseline proportions in CD3 and CD8 using manual labels"))
+```
+
+### 4b: CD3 for each method
+```{r fig4b,fig.height=10}
+v1 = CD3_vars[1]
+vobj1 = run_var_comps(v = v1)
+g1 = get_cp_plot(v1, vobj1$fits,m_v="Unnormalized: log10",marker="CD3")
+
+v2 = CD3_vars[2]
+vobj2 = run_var_comps(v = v2)
+g2 = get_cp_plot(v2, vobj2$fits,m_v="ComBat: log10",marker="CD3")
+
+v3 = CD3_vars[3]
+vobj3 = run_var_comps(v = v3)
+g3 = get_cp_plot(v3, vobj3$fits,m_v="fda: log10",marker="CD3")
+
+v4 = CD3_vars[4]
+vobj4 = run_var_comps(v = v4)
+g4 = get_cp_plot(v4, vobj4$fits,m_v="Unnormalized: Cube root",marker="CD3")
+
+v5 = CD3_vars[5]
+vobj5 = run_var_comps(v = v5)
+g5 = get_cp_plot(v5, vobj5$fits,m_v="ComBat: Cube root",marker="CD3")
+
+v6 = CD3_vars[6]
+vobj6 = run_var_comps(v = v6)
+g6 = get_cp_plot(v6, vobj6$fits,m_v="fda: Cube root",marker="CD3")
+
+v7 = CD3_vars[7]
+vobj7 = run_var_comps(v = v7)
+g7 = get_cp_plot(v7, vobj7$fits,m_v="Unnormalized: Mean division",marker="CD3")
+
+v8 = CD3_vars[8]
+vobj8 = run_var_comps(v = v8)
+g8 = get_cp_plot(v8, vobj8$fits,m_v="ComBat: Mean division",marker="CD3")
+
+v9 = CD3_vars[9]
+vobj9 = run_var_comps(v = v9)
+g9 = get_cp_plot(v9, vobj9$fits,m_v="fda: Mean division",marker="CD3")
+
+v10 = CD3_vars[10]
+vobj10 = run_var_comps(v = v10)
+g10 = get_cp_plot(v10, vobj10$fits,m_v="Unnormalized: Mean division log10",marker="CD3")
+
+v11 = CD3_vars[11]
+vobj11 = run_var_comps(v = v11)
+g11 = get_cp_plot(v11, vobj11$fits,m_v="ComBat: Mean division log10",marker="CD3")
+
+v12 = CD3_vars[12]
+vobj12 = run_var_comps(v = v12)
+g12 = get_cp_plot(v12, vobj12$fits,m_v="fda: Mean division log10",marker="CD3")
+
+## fig4b plot
+cd3fig = ggpubr::ggarrange(plotlist=list(g1,g2,g3,
+                           g4,g5,g6,
+                           g7,g8,g9,
+                           g10,g11,g12),common.legend = TRUE,legend = "none", ncol = 3,nrow=4)
+ggpubr::annotate_figure(cd3fig, top=text_grob("Proportions of CD3 by method"))
+```
+
+### 4c: CD8 for each method
+```{r fig4c,fig.height=10}
+v1 = CD8_vars[1]
+vobj1 = run_var_comps(v = v1)
+g1 = get_cp_plot(v1, vobj1$fits,m_v="Unnormalized: log10",marker="CD8")
+
+v2 = CD8_vars[2]
+vobj2 = run_var_comps(v = v2)
+g2 = get_cp_plot(v2, vobj2$fits,m_v="ComBat: log10",marker="CD8")
+
+v3 = CD8_vars[3]
+vobj3 = run_var_comps(v = v3)
+g3 = get_cp_plot(v3, vobj3$fits,m_v="fda: log10",marker="CD8")
+
+v4 = CD8_vars[4]
+vobj4 = run_var_comps(v = v4)
+g4 = get_cp_plot(v4, vobj4$fits,m_v="Unnormalized: Cube root",marker="CD8")
+
+v5 = CD8_vars[5]
+vobj5 = run_var_comps(v = v5)
+g5 = get_cp_plot(v5, vobj5$fits,m_v="ComBat: Cube root",marker="CD8")
+
+v6 = CD8_vars[6]
+vobj6 = run_var_comps(v = v6)
+g6 = get_cp_plot(v6, vobj6$fits,m_v="fda: Cube root",marker="CD8")
+
+v7 = CD8_vars[7]
+vobj7 = run_var_comps(v = v7)
+g7 = get_cp_plot(v7, vobj7$fits,m_v="Unnormalized: Mean division",marker="CD8")
+
+v8 = CD8_vars[8]
+vobj8 = run_var_comps(v = v8)
+g8 = get_cp_plot(v8, vobj8$fits,m_v="ComBat: Mean division",marker="CD8")
+
+v9 = CD8_vars[9]
+vobj9 = run_var_comps(v = v9)
+g9 = get_cp_plot(v9, vobj9$fits,m_v="fda: Mean division",marker="CD8")
+
+v10 = CD8_vars[10]
+vobj10 = run_var_comps(v = v10)
+g10 = get_cp_plot(v10, vobj10$fits,m_v="Unnormalized: Mean division log10",marker="CD8")
+
+v11 = CD8_vars[11]
+vobj11 = run_var_comps(v = v11)
+g11 = get_cp_plot(v11, vobj11$fits,m_v="ComBat: Mean division log10",marker="CD8")
+
+v12 = CD8_vars[12]
+vobj12 = run_var_comps(v = v12)
+g12 = get_cp_plot(v12, vobj12$fits,m_v="fda: Mean division log10",marker="CD8")
+
+## fig4c plot
+cd8fig = ggpubr::ggarrange(plotlist=list(g1,g2,g3,
+                           g4,g5,g6,
+                           g7,g8,g9,
+                           g10,g11,g12),common.legend = TRUE,legend = "none", ncol = 3,nrow=4)
+ggpubr::annotate_figure(cd8fig, top=text_grob("Proportions of CD8 by method"))
+```
+
+## Figure 5:  UMAP embedding of data for each transformation method
+```{r umap}
+## --- Multivariate clustering
+## create downsampled data
+scs = split(sc,sc$SlideID)
+ds_scs_list = lapply(X=1:length(scs),FUN = function(i){
+  nr=nrow(scs[[i]])
+  scs[[i]][sample(x = 1:nr,size = round(0.1 * nr)),]
+})
+
+## set vars for clustering
+dsd = data.frame(data.table::rbindlist(ds_scs_list))
+epi_vars = all_vars[3:6]
+all_dfs = data.frame()
+
+## run umap on all methods
+for(m in methods){
+  ## get umap loadings
+  u1 = tumap(dsd[,paste0(epi_vars,"_",m)])
+  df_add = data.frame(u1[,1],u1[,2])
+  colnames(df_add) = c("U1","U2")
+  
+  ## add relevant columns
+  df_add$method = m
+  df_add$epi = dsd$epi
+  df_add$tumor = dsd$Tumor
+  df_add$SlideID = dsd$SlideID
+  
+  all_dfs = rbind(df_add,all_dfs)
+}
+```
+
+
+### 5ab: Raw data, colored by tissue class and slide identifier
+```{r fig5ab}
+m = "raw"
+u1 = tumap(dsd[,paste0(epi_vars,"_",m)])
+df_add = data.frame(u1[,1],u1[,2])
+colnames(df_add) = c("U1","U2")
+
+## add relevant columns
+df_add$method = m
+df_add$epi = dsd$epi
+df_add$tumor = dsd$Tumor
+df_add$SlideID = dsd$SlideID
+
+## tissue class plot
+e1 = ggplot(df_add) + 
+  geom_point(aes(x=U1,y=U2,color=factor(epi)),size=0.01,alpha=0.05) +
+  scale_x_continuous("Raw (by Tissue Class)") +
+  scale_y_continuous("") +
+  scale_color_manual("Tissue type",labels=c("Stroma","Epithelium"),values=c("tan1","skyblue4")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(colour = guide_legend(override.aes = list(size=2)))
+
+## slide plot
+s1 = ggplot(df_add) + 
+  geom_point(aes(x=U1,y=U2,color=factor(SlideID)),size=0.01,alpha=0.05) +
+  scale_x_continuous("Raw (by Slide)") +
+  scale_y_continuous("") +
+  theme_minimal() +
+  theme(legend.position = "None")
+
+## fig5ab plot
+ggpubr::ggarrange(e1,s1)
+```
+
+### 5c: Methods colored by tissue class
+```{r fig5c, fig.height=10}
+msplit = split(all_dfs,all_dfs$method)
+msplit = msplit[c(4,5,6,1,2,3,7,8,9,10,11,12)]
+#msplit = append(msplit,values="blank",after=8)
+
+new_labs = c("Unnormalized: log10",
+                       "ComBat: log10", 
+                       "fda: log10",
+                       "Unnormalized: Cube root",
+                       "ComBat: Cube root", 
+                       "fda: Cube root",
+                       "Unnormalized: Mean division",
+                       "ComBat: Mean division", 
+                       "fda: Mean division",
+                       "Unnormalized: Mean division log10",
+                       "ComBat: Mean division log10",
+                       "fda: Mean division log10")
+
+## 4x3 figure of each method UMAP
+plist = lapply(X=1:length(msplit),FUN=function(i){
+  m = msplit[[i]]
+  ggplot(m) + 
+    geom_point(aes(x=U1,y=U2,color=factor(epi)),size=0.01,alpha=0.35) +
+    scale_x_continuous(paste0(new_labs[i],""))+
+    scale_y_continuous("") +
+    scale_color_manual("Tissue type",labels=c("Stroma","Epithelium"),values=c("tan1","skyblue4")) +
+    theme_minimal() +
+    guides(colour = guide_legend(override.aes = list(size=2)))
+})
+
+## fig5c plot
+ggpubr::ggarrange(plotlist=plist,legend = "bottom",common.legend = TRUE,nrow=4,ncol=3)
+```
+
+### 5d: Methods colored by slide identifier
+```{r fig5d, fig.height=10}
+## 4x3 figure of each method UMAP
+plist = lapply(X=1:length(msplit),FUN=function(i){
+  m = msplit[[i]]
+    ggplot(m)  + 
+      geom_point(aes(x=U1,y=U2,color=factor(SlideID)),size=0.01,alpha=0.05) +
+      scale_x_continuous(paste0(new_labs[i]," (by Slide)"))+
+      scale_y_continuous("") + 
+      #scale_color_manual(values=vals) +
+      theme_minimal() +
+      theme(legend.position = "None")
+  # }
+})
+
+## fig5d plot
+ggpubr::ggarrange(plotlist=plist,nrow=4,ncol=3)
+```
+
+## `R` Version info
+```{r}
+sessionInfo()
+```
+
