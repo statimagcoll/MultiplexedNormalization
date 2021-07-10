@@ -14,4 +14,4 @@ This R markdown file relies on R scripts as included in the repository, that imp
 - Implementing the ComBat algorithm for multiplexed imaging (`all_combat_functions_210709.R`)
 - Calculting Otsu thresolds and metrics (`all_otsu_functions_210709.R`)
 
-Please feel free to reach out to me, coleman.r.harris@vanderbilt.edu, with any questions.
+Please feel free to reach out to Coleman Harris, coleman.r.harris@vanderbilt.edu, with any questions.

@@ -1,14 +1,16 @@
 ---
-title: "Code Supplement - Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images"
+title: "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images (analysis methods and code)"
 author: "Coleman Harris, coleman.r.harris@vanderbilt.edu"
 date: "2021-07-09"
 output:
   html_document:
     code_folding: hide
     toc: true
+    toc_float: true
+    toc_collapsed: true
 ---
 
-This notebook details the various analyses and code implementations used in the paper, "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images." Please see [here](https://colemanrharris.me) for more information on the paper. The analyses here rely also on the following scripts, available in the Github repository, for further functionality:
+This notebook details the various analyses and code implementations used in the paper, "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images." Please see [here](https://colemanrharris.me) for more information on the paper and for complete descriptions of the analyses and concepts therein. The analyses here rely also on the following scripts, available in the Github repository, for further functionality:
 
 - `all_combat_functions_210709.R`: code to run the ComBat algorithm
 - `all_fda_functions_210709.R`: code to run the functional data registration algorithm
@@ -16,7 +18,7 @@ This notebook details the various analyses and code implementations used in the 
 
 ## Setup
 
-```{r setup}
+```{r setup,results='hide',message=FALSE,warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE,warning = FALSE,fig.width = 10,message = FALSE)
 ## tidyverse packages
 require(dplyr)
@@ -41,7 +43,8 @@ x_axis_text_size = 8
 vals = rev(inferno(43))
 ```
 
-## Load data
+## Normalization analyses
+### Load data
 
 ```{r load data}
 ## load data from https://github.com/statimagcoll/atlasAnalysis
@@ -63,7 +66,7 @@ methods = c(methods,paste0(methods[1:4],"_ComBat_incl_zeroes"))
 ## -- !end set all methods
 ```
 
-## Run transformations
+### Run transformations
 Run the scale transformations on each variable as selected above. The transformations included are as follows:
 
 - log10: $\log_{10}(y + 1)$
@@ -111,7 +114,7 @@ for(v in all_vars){
 }
 ```
 
-## Run the functional data registration algorithm
+### Run the functional data registration algorithm
 
 ```{r fda,results='hide'}
 ## --- --- ---
@@ -138,7 +141,7 @@ for(j in all_vars){
 }
 ```
 
-## Run the ComBat algorithm
+### Run the ComBat algorithm
 
 ```{r combat}
 ## --- --- ---
@@ -158,7 +161,7 @@ for(j in all_vars){
 }
 ```
 
-## Run evaluation metrics for downstream analysis
+### Run evaluation metrics for downstream analysis
 ```{r otsus}
 ## --- --- ---
 ## --- Otsu thresholds
@@ -186,7 +189,8 @@ otsus  = generate_otsu_data(sc,all_vars = all_vars,c(methods,"raw"))
 all_means = run_misclassification(sc,otsus,c(methods,"raw"))
 ```
 
-## Figure 1: Visual comparison of vimentin marker densities for each transformation method
+## Paper figures
+### Figure 1: Visual comparison of vimentin marker densities for each transformation method
 ```{r fig1,fig.height=7}
 htan1 = ggplot(sc) +
   geom_density(aes(x=Median_Cell_VIMENTIN_log10,color=SlideID)) + 
@@ -303,7 +307,7 @@ ggpubr::ggarrange(htan1,htan2,htan3,
                   htan10,htan11,htan12,nrow=4,ncol =3)
 ```
 
-## Figure 2A: Otsu misclassification
+### Figure 2A: Otsu misclassification
 ```{r fig2a,fig.height=6}
 ## --- calculate as ratios to raw data
 all_ratios=all_means
@@ -355,7 +359,7 @@ ggplot(plot_values) +
   theme(axis.text.y = element_text(hjust = 0))
 ```
 
-## Figure 2B: Otsu misclassification (using manual labels)
+### Figure 2B: Otsu misclassification (using manual labels)
 ```{r fig2b,fig.height=6}
 ## --- calculate Otsus on manual labels for CD3 & CD8
 cd3s = c(); cd8s = c()
@@ -410,7 +414,7 @@ ggplot(acc_dat)+
   theme(axis.text.y = element_text(hjust = 0),legend.position = "right")
 ```
 
-## Figure 3: Proportion of variance present at slide-level in random effects model for CD3 andCD8 markers
+### Figure 3: Proportion of variance present at slide-level in random effects model for CD3 and CD8 markers
 ```{r fig3}
 ## --- --- ---
 ### --- get baseline values from raw data
@@ -513,8 +517,8 @@ gcd8 = ggplot(cd8_vcs) +
 ggpubr::ggarrange(gcd3,gcd8,nrow=2,ncol=1,legend = "bottom",common.legend = TRUE)
 ```
 
-## Figure 4: Comparison of cell proportions for each transformation method
-### 4a: Manually labelled cells
+### Figure 4: Comparison of cell proportions for each transformation method
+#### 4a: Manually labelled cells
 ```{r fig4a}
 tts = read.csv('/media/disk2/atlas_mxif/data/TissueSubTypes Colon Map.csv')
 
@@ -606,7 +610,7 @@ bfig = ggpubr::ggarrange(b1,b2,common.legend = TRUE,legend = "none")
 ggpubr::annotate_figure(bfig, top=text_grob("Baseline proportions in CD3 and CD8 using manual labels"))
 ```
 
-### 4b: CD3 for each method
+#### 4b: CD3 for each method
 ```{r fig4b,fig.height=10}
 v1 = CD3_vars[1]
 vobj1 = run_var_comps(v = v1)
@@ -664,7 +668,7 @@ cd3fig = ggpubr::ggarrange(plotlist=list(g1,g2,g3,
 ggpubr::annotate_figure(cd3fig, top=text_grob("Proportions of CD3 by method"))
 ```
 
-### 4c: CD8 for each method
+#### 4c: CD8 for each method
 ```{r fig4c,fig.height=10}
 v1 = CD8_vars[1]
 vobj1 = run_var_comps(v = v1)
@@ -722,7 +726,9 @@ cd8fig = ggpubr::ggarrange(plotlist=list(g1,g2,g3,
 ggpubr::annotate_figure(cd8fig, top=text_grob("Proportions of CD8 by method"))
 ```
 
-## Figure 5:  UMAP embedding of data for each transformation method
+### Figure 5:  UMAP embedding of data for each transformation method
+Note that the UMAP algorithm is stochastic, and because of the data size, we are downsampling so these plots may not be identical to those in the paper.
+
 ```{r umap}
 ## --- Multivariate clustering
 ## create downsampled data
@@ -755,7 +761,7 @@ for(m in methods){
 ```
 
 
-### 5ab: Raw data, colored by tissue class and slide identifier
+#### 5ab: Raw data, colored by tissue class and slide identifier
 ```{r fig5ab}
 m = "raw"
 u1 = tumap(dsd[,paste0(epi_vars,"_",m)])
@@ -790,7 +796,7 @@ s1 = ggplot(df_add) +
 ggpubr::ggarrange(e1,s1)
 ```
 
-### 5c: Methods colored by tissue class
+#### 5c: Methods colored by tissue class
 ```{r fig5c, fig.height=10}
 msplit = split(all_dfs,all_dfs$method)
 msplit = msplit[c(4,5,6,1,2,3,7,8,9,10,11,12)]
@@ -825,7 +831,7 @@ plist = lapply(X=1:length(msplit),FUN=function(i){
 ggpubr::ggarrange(plotlist=plist,legend = "bottom",common.legend = TRUE,nrow=4,ncol=3)
 ```
 
-### 5d: Methods colored by slide identifier
+#### 5d: Methods colored by slide identifier
 ```{r fig5d, fig.height=10}
 ## 4x3 figure of each method UMAP
 plist = lapply(X=1:length(msplit),FUN=function(i){
