@@ -1,7 +1,7 @@
 ---
 title: "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images (analysis methods and code)"
 author: "Coleman Harris, coleman.r.harris@vanderbilt.edu"
-date: "2021-07-09"
+date: "2021-07-14"
 output:
   html_document:
     code_folding: hide

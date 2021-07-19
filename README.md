@@ -1,5 +1,5 @@
 # MultiplexedNormalization
-R code and scripts to run the multiplexed imaging normalization methods, detailed in the "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images" paper. Please see [here](https://colemanrharris.me) to explore the paper.
+R code and scripts to run the multiplexed imaging normalization methods, detailed in the "Quantifying and correcting slide-to-slide variation in multiplexed immunofluorescence images" paper. Please see [here](https://doi.org/10.1101/2021.07.16.452359) to explore the paper.
 
 The `normalization_methods.Rmd` file performs all of the necessary analyses to recreate the analysis performed in the paper - all necessary packages and setup are performed in the markdown file itself (an HTML file generated with `knitr` is included in this repository as well). The analyses performed include:
 - Loading the dataset
